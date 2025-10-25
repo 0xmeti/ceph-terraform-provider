@@ -71,6 +71,14 @@ func (r *poolResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
                     int64planmodifier.UseStateForUnknown(),
                 },
             },
+            "pgp_num": schema.Int64Attribute{
+                Description: "Number of placement groups for placement",
+                Optional:    true,
+                Computed:    true,
+                PlanModifiers: []planmodifier.Int64{
+                    int64planmodifier.UseStateForUnknown(),
+                },
+            },
             "size": schema.Int64Attribute{
                 Description: "Replication size",
                 Optional:    true,
@@ -130,18 +138,30 @@ func (r *poolResource) Create(ctx context.Context, req resource.CreateRequest, r
     if !plan.PgNum.IsNull() {
         pgNum = plan.PgNum.ValueInt64()
     }
+    
+    pgpNum := pgNum
+    if !plan.PgpNum.IsNull() {
+        pgpNum = plan.PgpNum.ValueInt64()
+    }
 
     size := int64(3)
     if !plan.Size.IsNull() {
         size = plan.Size.ValueInt64()
     }
 
+    application := ""
+    if !plan.Application.IsNull() {
+        application = plan.Application.ValueString()
+    }
+
     // Create pool request
     poolReq := PoolCreateRequest{
-        Pool:     poolName,
-        PoolType: poolType,
-        PgNum:    int(pgNum),
-        Size:     int(size),
+        Pool:        poolName,
+        PoolType:    poolType,
+        PgNum:       int(pgNum),
+        PgpNum:      int(pgpNum),
+        Size:        int(size),
+        Application: application,
     }
 
     err := r.client.CreatePool(poolReq)
@@ -153,9 +173,8 @@ func (r *poolResource) Create(ctx context.Context, req resource.CreateRequest, r
         return
     }
 
-    // Set application if provided
-    if !plan.Application.IsNull() {
-        application := plan.Application.ValueString()
+    // Set application if provided and not already set during pool creation
+    if application != "" {
         err = r.client.SetApplication(poolName, application)
         if err != nil {
             resp.Diagnostics.AddWarning(
@@ -169,7 +188,11 @@ func (r *poolResource) Create(ctx context.Context, req resource.CreateRequest, r
     plan.ID = types.StringValue(poolName)
     plan.PoolType = types.StringValue(poolType)
     plan.PgNum = types.Int64Value(pgNum)
+    plan.PgpNum = types.Int64Value(pgpNum)
     plan.Size = types.Int64Value(size)
+    if application != "" {
+        plan.Application = types.StringValue(application)
+    }
 
     // Save data into Terraform state
     resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -189,6 +212,12 @@ func (r *poolResource) Read(ctx context.Context, req resource.ReadRequest, resp 
     poolName := state.Name.ValueString()
     poolData, err := r.client.GetPool(poolName)
     if err != nil {
+        // If the pool is not found, remove it from state
+        if err.Error() == "pool not found" {
+            resp.State.RemoveResource(ctx)
+            return
+        }
+        
         resp.Diagnostics.AddError(
             "Error Reading Ceph Pool",
             fmt.Sprintf("Could not read pool %s: %s", poolName, err.Error()),
@@ -203,6 +232,10 @@ func (r *poolResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
     if pgNum, ok := poolData["pg_num"].(float64); ok {
         state.PgNum = types.Int64Value(int64(pgNum))
+    }
+    
+    if pgpNum, ok := poolData["pgp_num"].(float64); ok {
+        state.PgpNum = types.Int64Value(int64(pgpNum))
     }
 
     if size, ok := poolData["size"].(float64); ok {
@@ -223,17 +256,20 @@ func (r *poolResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 // Update updates the resource and sets the updated Terraform state on success
 func (r *poolResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
     var plan PoolResourceModel
+    var state PoolResourceModel
 
     // Read Terraform plan data into the model
     resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+    resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
     if resp.Diagnostics.HasError() {
         return
     }
 
     poolName := plan.Name.ValueString()
+    changed := false
 
     // Update pg_num if changed
-    if !plan.PgNum.IsNull() {
+    if !plan.PgNum.IsNull() && plan.PgNum.ValueInt64() != state.PgNum.ValueInt64() {
         pgNum := int(plan.PgNum.ValueInt64())
         err := r.client.SetPoolProperty(poolName, "pg_num", pgNum)
         if err != nil {
@@ -243,10 +279,25 @@ func (r *poolResource) Update(ctx context.Context, req resource.UpdateRequest, r
             )
             return
         }
+        changed = true
+    }
+    
+    // Update pgp_num if changed
+    if !plan.PgpNum.IsNull() && plan.PgpNum.ValueInt64() != state.PgpNum.ValueInt64() {
+        pgpNum := int(plan.PgpNum.ValueInt64())
+        err := r.client.SetPoolProperty(poolName, "pgp_num", pgpNum)
+        if err != nil {
+            resp.Diagnostics.AddError(
+                "Error Updating Pool PGP Num",
+                fmt.Sprintf("Could not update pgp_num for pool %s: %s", poolName, err.Error()),
+            )
+            return
+        }
+        changed = true
     }
 
     // Update size if changed
-    if !plan.Size.IsNull() {
+    if !plan.Size.IsNull() && plan.Size.ValueInt64() != state.Size.ValueInt64() {
         size := int(plan.Size.ValueInt64())
         err := r.client.SetPoolProperty(poolName, "size", size)
         if err != nil {
@@ -256,10 +307,12 @@ func (r *poolResource) Update(ctx context.Context, req resource.UpdateRequest, r
             )
             return
         }
+        changed = true
     }
 
     // Update application if changed
-    if !plan.Application.IsNull() {
+    if !plan.Application.IsNull() && 
+       (state.Application.IsNull() || plan.Application.ValueString() != state.Application.ValueString()) {
         application := plan.Application.ValueString()
         err := r.client.SetApplication(poolName, application)
         if err != nil {
@@ -268,6 +321,43 @@ func (r *poolResource) Update(ctx context.Context, req resource.UpdateRequest, r
                 fmt.Sprintf("Could not update application for pool %s: %s", poolName, err.Error()),
             )
             return
+        }
+        changed = true
+    }
+
+    // If something changed, refresh the state
+    if changed {
+        poolData, err := r.client.GetPool(poolName)
+        if err != nil {
+            resp.Diagnostics.AddError(
+                "Error Reading Updated Ceph Pool",
+                fmt.Sprintf("Could not read updated pool %s: %s", poolName, err.Error()),
+            )
+            return
+        }
+        
+        // Update the state with the latest data
+        if poolType, ok := poolData["type"].(string); ok {
+            plan.PoolType = types.StringValue(poolType)
+        }
+
+        if pgNum, ok := poolData["pg_num"].(float64); ok {
+            plan.PgNum = types.Int64Value(int64(pgNum))
+        }
+        
+        if pgpNum, ok := poolData["pgp_num"].(float64); ok {
+            plan.PgpNum = types.Int64Value(int64(pgpNum))
+        }
+
+        if size, ok := poolData["size"].(float64); ok {
+            plan.Size = types.Int64Value(int64(size))
+        }
+
+        if apps, ok := poolData["application_metadata"].(map[string]interface{}); ok {
+            for app := range apps {
+                plan.Application = types.StringValue(app)
+                break
+            }
         }
     }
 

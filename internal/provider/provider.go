@@ -5,13 +5,12 @@ import (
     "os"
 
     "github.com/hashicorp/terraform-plugin-framework/datasource"
-    "github.com/hashicorp/terraform-plugin-framework/path"  // ADD THIS LINE
+    "github.com/hashicorp/terraform-plugin-framework/path"
     "github.com/hashicorp/terraform-plugin-framework/provider"
     "github.com/hashicorp/terraform-plugin-framework/provider/schema"
     "github.com/hashicorp/terraform-plugin-framework/resource"
-    "github.com/hashicorp/terraform-plugin-framework/types"
+    // Removed the unused import: "github.com/hashicorp/terraform-plugin-framework/types"
 )
-
 
 // Ensure the implementation satisfies the expected interfaces
 var (

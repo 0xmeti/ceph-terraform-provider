@@ -189,3 +189,73 @@ func (c *CephClient) DeletePool(poolName string) error {
     
     return nil
 }
+
+// SetPoolProperty sets a property on a pool
+func (c *CephClient) SetPoolProperty(poolName string, property string, value interface{}) error {
+    if c.Token == "" {
+        if err := c.Authenticate(); err != nil {
+            return err
+        }
+    }
+    
+    requestBody := map[string]interface{}{
+        property: value,
+    }
+    
+    body, _ := json.Marshal(requestBody)
+    req, err := http.NewRequest("PATCH", c.Endpoint+"/api/pool/"+poolName, bytes.NewBuffer(body))
+    if err != nil {
+        return fmt.Errorf("failed to create set pool property request: %w", err)
+    }
+    
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Bearer "+c.Token)
+    
+    resp, err := c.HTTPClient.Do(req)
+    if err != nil {
+        return fmt.Errorf("set pool property request failed: %w", err)
+    }
+    defer resp.Body.Close()
+    
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+        bodyBytes, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("failed to set pool property with status %d: %s", resp.StatusCode, string(bodyBytes))
+    }
+    
+    return nil
+}
+
+// SetApplication sets an application on a pool
+func (c *CephClient) SetApplication(poolName string, application string) error {
+    if c.Token == "" {
+        if err := c.Authenticate(); err != nil {
+            return err
+        }
+    }
+    
+    requestBody := map[string]interface{}{
+        "application": application,
+    }
+    
+    body, _ := json.Marshal(requestBody)
+    req, err := http.NewRequest("POST", c.Endpoint+"/api/pool/"+poolName+"/application", bytes.NewBuffer(body))
+    if err != nil {
+        return fmt.Errorf("failed to create set application request: %w", err)
+    }
+    
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Bearer "+c.Token)
+    
+    resp, err := c.HTTPClient.Do(req)
+    if err != nil {
+        return fmt.Errorf("set application request failed: %w", err)
+    }
+    defer resp.Body.Close()
+    
+    if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+        bodyBytes, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("failed to set application with status %d: %s", resp.StatusCode, string(bodyBytes))
+    }
+    
+    return nil
+}
